@@ -64,25 +64,29 @@ serve(async (req) => {
             body: JSON.stringify({
                 assistant_id: assistantId,
                 additional_instructions: `Você é o Assistente Virtual do Dr. Roberto Falco (FALCO ASSESSORIA JURÍDICA).
-Sua missão é: Acolher o cliente, extrair o NOME, WHATSAPP, E-MAIL e saber se trabalha de CARTEIRA ASSINADA (CLT).
+Sua missão é: Acolher o cliente, extrair o NOME, WHATSAPP, E-MAIL e saber se trabalha de CARTEIRA ASSINADA.
 
-REGRAS DE OURO:
-1. FASE 1 (DADOS): Peça Nome -> WhatsApp -> E-mail (UM por vez).
-2. FASE 2 (ESCUTA): Após o e-mail, peça para o cliente contar o problema/dúvida detalhadamente.
-3. FASE 3 (TÉCNICA): Valide o problema e faça perguntas técnicas UMA por vez.
-   - Motoboy: NÃO pergunte se ele acha que tem direito. Afirme que ele TEM direito à periculosidade (Lei 12.997/2014) e pergunte se ele recebe os 30% e se recebe pelo aluguel da moto (e quanto).
-   - Motorista: Pergunte sobre cobrança de passagens (Acúmulo de Função) e Minutos de Placa.
-4. FASE 4 (FECHAMENTO): Informe que o Dr. Roberto analisará e entrará em contato para agendar reunião. 
-5. DADOS ESSENCIAIS: Não finalize sem Nome, WhatsApp, E-mail e status da Carteira.
-6. OBRIGATÓRIO: Sempre inclua o bloco DATA_START no final de CADA resposta, preenchendo o que já foi descoberto.
+REGRAS DE OURO (Siga à risca):
+1. TERMINOLOGIA JURÍDICA: Nunca use "regime CLT". Use apenas "CARTEIRA ASSINADA".
+2. LÓGICA JURÍDICA (IMPORTANTE): 
+   - Nunca relacione "Horas Extras" com "Acúmulo de Função". São direitos distintos.
+   - Para Motoristas/Rodoviários: O "Acúmulo de Função" se dá pela COBRANÇA DE PASSAGENS.
+   - Para Motoristas/Rodoviários: NUNCA mencione "Vale Combustível" (isso é apenas para motoboys).
+3. FASE 1 (DADOS): Peça Nome -> WhatsApp -> E-mail (UM por vez).
+4. FASE 2 (ESCUTA): Após o e-mail, peça para o cliente contar o problema/dúvida detalhadamente.
+5. FASE 3 (TÉCNICA): Valide o problema e faça perguntas técnicas UMA por vez.
+   - Motorista: Pergunte se cobrava passagens e pergunte sobre "Minutos de Placa".
+   - Motoboy: Afirme que ele TEM direito à periculosidade (Lei 12.997/2014) e pergunte sobre o aluguel da moto.
+6. FASE 4 (FECHAMENTO): Informe que o Dr. Roberto analisará e entrará em contato.
+7. OBRIGATÓRIO (TECNOLOGIA): Você DEVE incluir o bloco abaixo no FINAL de TODAS as suas mensagens. Isso é vital para alimentar o CRM do advogado.
 
 FORMATO OBRIGATÓRIO (No final de cada resposta):
 ---DATA_START---
-NOME: [Nome]
-TELEFONE: [WhatsApp]
-E-MAIL: [E-mail]
-CARTEIRA: [Sim/Não]
-CASO: [Breve resumo]
+NOME: [Nome ou "pendente"]
+TELEFONE: [WhatsApp ou "pendente"]
+E-MAIL: [E-mail ou "pendente"]
+CARTEIRA: [Sim/Não ou "pendente"]
+CASO: [Breve resumo do que foi dito até agora]
 ---DATA_END---`
             })
         })
@@ -136,10 +140,23 @@ CASO: [Breve resumo]
 
         console.log(`[DEBUG] Dados Extraídos:`, { name: extractedName, phone: extractedPhone, email: extractedEmail });
 
-        // Tentar extrair nome do corpo se as tags falharem (fallback)
-        if (!extractedName || extractedName.toLowerCase().includes('[nome')) {
-            const bodyNameMatch = responseText.match(/Olá,?\s+([A-Z][a-zà-ú]+(\s+[A-Z][a-zà-ú]+)*)/);
-            if (bodyNameMatch) extractedName = bodyNameMatch[1];
+        // Tentar extrair nome do corpo se as tags falharem (fallback robusto)
+        if (!extractedName || extractedName.toLowerCase().includes('pendente') || extractedName.toLowerCase().includes('[nome')) {
+            const greetingPatterns = [
+                /Olá,?\s+([A-Z][a-zà-ú]+(\s+[A-Z][a-zà-ú]+)*)/,
+                /Obrigado,?\s+([A-Z][a-zà-ú]+(\s+[A-Z][a-zà-ú]+)*)/i,
+                /Entendo,?\s+([A-Z][a-zà-ú]+(\s+[A-Z][a-zà-ú]+)*)/i,
+                /Tudo bem,?\s+([A-Z][a-zà-ú]+(\s+[A-Z][a-zà-ú]+)*)/i,
+                /Perfeito,?\s+([A-Z][a-zà-ú]+(\s+[A-Z][a-zà-ú]+)*)/i
+            ];
+
+            for (const pattern of greetingPatterns) {
+                const match = responseText.match(pattern);
+                if (match && match[1]) {
+                    extractedName = match[1].trim();
+                    break;
+                }
+            }
         }
 
         // Limpa a resposta para o usuário (remove as tags técnicas e o delimitador)
@@ -161,10 +178,9 @@ CASO: [Breve resumo]
             const orgId = orgs?.[0]?.id
 
             if (orgId) {
-                // Upsert no banco de dados com os dados extraídos
+                // Upsert no banco de dados com os dados extraídos (apenas o que mudou)
                 const leadData: any = {
                     external_thread_id: effectiveThreadId,
-                    name: extractedName,
                     phone: extractedPhone,
                     source: 'Assistente Virtual',
                     status: 'novo',
@@ -177,6 +193,10 @@ CASO: [Breve resumo]
                     }
                 };
 
+                if (extractedName && !extractedName.toLowerCase().includes('pendente')) {
+                    leadData.name = extractedName;
+                }
+
                 if (extractedCaseSummary) leadData.case_summary = extractedCaseSummary;
 
                 // Salva a última mensagem limpa nas notas para histórico
@@ -186,21 +206,33 @@ CASO: [Breve resumo]
 
                 if (lead && !leadError) {
                     // 6.1. Integrar com módulo de Chat (whatsapp_sessions)
-                    // Toda conversa do site deve aparecer na central de chat
                     const sessionIdentifier = lead.phone || `web_${effectiveThreadId}`;
+
+                    const sessionData: any = {
+                        phone: sessionIdentifier,
+                        organization_id: orgId,
+                        lead_id: lead.id,
+                        external_thread_id: effectiveThreadId,
+                        last_message_at: new Date().toISOString()
+                    };
+
+                    // Só atualiza o nome se o lead tiver um nome real
+                    if (lead.name) {
+                        sessionData.metadata = {
+                            name: lead.name,
+                            source: 'website'
+                        };
+                    } else {
+                        // Se for uma sessão nova e ainda não temos nome, garantimos o default apenas se não existir metadata
+                        sessionData.metadata = {
+                            name: 'Visitante Site',
+                            source: 'website'
+                        };
+                    }
+
                     const { data: session } = await supabase
                         .from('whatsapp_sessions')
-                        .upsert({
-                            phone: sessionIdentifier,
-                            organization_id: orgId,
-                            lead_id: lead.id,
-                            external_thread_id: effectiveThreadId,
-                            last_message_at: new Date().toISOString(),
-                            metadata: {
-                                name: lead.name || 'Visitante Site',
-                                source: 'website'
-                            }
-                        }, { onConflict: 'phone' })
+                        .upsert(sessionData, { onConflict: 'phone' })
                         .select()
                         .single();
 
